@@ -106,7 +106,7 @@ def main():
         sys_python_path = sys.executable
     else:
         if os.environ.get('IDF_PYTHON_ENV_PATH') is None:
-            sys_python_path = 'python'
+            sys_python_path = sys.executable
         else:
             sys_python_path = os.path.join(os.environ.get('IDF_PYTHON_ENV_PATH'), 'bin', 'python')
 

@@ -199,7 +199,7 @@ def at_patch_if_config(platform, module):
 
     patch_tool = os.path.join(os.getcwd(), 'tools', 'patch.py')
     if os.path.exists(patch_tool) and os.path.exists(config_dir):
-        cmd = 'python {} {}'.format(patch_tool, config_dir)
+        cmd = '{} {} {}'.format(sys.executable, patch_tool, config_dir)
         if subprocess.call(cmd, shell = True):
             raise Exception('apply patches failed.')
         ESP_LOGI('patches check completed for updates.')
@@ -214,7 +214,7 @@ def build_project(platform_name, module_name, silence, build_args):
         sys_python_path = sys.executable
     else:
         if os.environ.get('IDF_PYTHON_ENV_PATH') is None:
-            sys_python_path = 'python'
+            sys_python_path = sys.executable
         else:
             sys_python_path = os.path.join(os.environ.get('IDF_PYTHON_ENV_PATH'), 'bin', 'python')
 

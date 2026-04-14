@@ -27,6 +27,7 @@
 
 #include "esp_at.h"
 #include "at_custom_hid_cmd.h"
+#include "at_custom_wifi_cmd.h"
 #include "at_custom_zigbee_cmd.h"
 
 #ifdef CONFIG_AT_BASE_ON_SPI
@@ -424,6 +425,7 @@ void at_custom_init(void)
         return;
     }
     esp_at_custom_hid_cmd_register();
+    esp_at_custom_wifi_cmd_register();
     esp_at_custom_zigbee_cmd_register();
     xTaskCreate(at_spi_slave_task , "at_spi_task" , 4096 , NULL , 10 , NULL);
 }

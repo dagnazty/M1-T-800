@@ -105,36 +105,113 @@ static void stop_all_attacks(void)
     stop_task(&s_hscap_task_handle, &s_hscap_stop_flag);
 }
 
-/* Enter monitor mode on a given channel. Returns true on success. */
+/* Last enter_monitor failure reason (short code), for error reporting */
+static const char *s_monitor_err = "";
+
+/* If we're already on the requested channel in monitor mode, just retune if
+ * needed and verify. Returns true when the driver can inject on `channel`. */
 static bool enter_monitor(uint8_t channel)
 {
+    esp_err_t err;
+    wifi_mode_t cur_mode = WIFI_MODE_NULL;
+    bool promisc = false;
+    uint8_t cur_ch = 0;
+    wifi_second_chan_t cur_sec = WIFI_SECOND_CHAN_NONE;
+
+    s_monitor_err = "";
+
+    /* Fast path: already in monitor on the right channel AND driver agrees.
+     * Verify against the driver, not just our cached flag — the driver can
+     * drop out of promisc under us after a scan or disconnect. */
     if (s_monitor_active && s_monitor_channel == channel) {
-        return true;  /* already there */
+        esp_wifi_get_promiscuous(&promisc);
+        esp_wifi_get_channel(&cur_ch, &cur_sec);
+        if (promisc && cur_ch == channel) {
+            return true;
+        }
+        ESP_LOGW(TAG, "Monitor flag stale (promisc=%d ch=%u want=%u) — re-entering",
+                 promisc, (unsigned)cur_ch, (unsigned)channel);
+        s_monitor_active = false;  /* force full re-init */
     }
 
     stop_all_attacks();
 
-    /* Disconnect STA if connected */
-    esp_wifi_disconnect();
+    /* Clear any promisc RX callback from a previous session */
+    esp_wifi_set_promiscuous_rx_cb(NULL);
+
+    /* Disconnect STA if connected. Ignore errors — not being connected is fine. */
+    (void)esp_wifi_disconnect();
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    /* Stop wifi, set STA mode + promiscuous for TX capability
-     * ESP32-C6 silently drops esp_wifi_80211_tx in WIFI_MODE_NULL.
-     * Must use STA mode with promiscuous enabled for injection. */
-    esp_wifi_stop();
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_start();
-    vTaskDelay(pdMS_TO_TICKS(100));
+    /* Drop promiscuous if it was left on. Ignore errors. */
+    (void)esp_wifi_set_promiscuous(false);
 
-    /* Enable promiscuous */
-    esp_wifi_set_promiscuous(true);
+    /* Stop wifi before changing mode. Not-started is not fatal. */
+    err = esp_wifi_stop();
+    if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_INIT && err != ESP_ERR_WIFI_NOT_STARTED) {
+        ESP_LOGE(TAG, "enter_monitor: esp_wifi_stop() -> %s", esp_err_to_name(err));
+        s_monitor_err = "STOP";
+        return false;
+    }
 
-    /* Set channel */
-    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    /* Set STA mode. ESP32-C6 silently drops esp_wifi_80211_tx in WIFI_MODE_NULL,
+     * so STA + promiscuous is required for raw injection. */
+    err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "enter_monitor: set_mode(STA) -> %s", esp_err_to_name(err));
+        s_monitor_err = "MODE";
+        return false;
+    }
+
+    /* Verify the mode took effect before we proceed. */
+    err = esp_wifi_get_mode(&cur_mode);
+    if (err != ESP_OK || cur_mode != WIFI_MODE_STA) {
+        ESP_LOGE(TAG, "enter_monitor: mode did not switch to STA (got %d, err=%s)",
+                 (int)cur_mode, esp_err_to_name(err));
+        s_monitor_err = "MODE_VERIFY";
+        return false;
+    }
+
+    /* Start WiFi. */
+    err = esp_wifi_start();
+    if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGE(TAG, "enter_monitor: esp_wifi_start() -> %s", esp_err_to_name(err));
+        s_monitor_err = "START";
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(150));
+
+    /* Enable promiscuous — required for 80211_tx on C6. */
+    err = esp_wifi_set_promiscuous(true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "enter_monitor: set_promiscuous(true) -> %s", esp_err_to_name(err));
+        s_monitor_err = "PROMISC";
+        return false;
+    }
+
+    /* Set channel. */
+    err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "enter_monitor: set_channel(%u) -> %s", channel, esp_err_to_name(err));
+        s_monitor_err = "CHAN";
+        return false;
+    }
+
+    /* Verify promiscuous + channel actually stuck. */
+    promisc = false;
+    cur_ch = 0;
+    esp_wifi_get_promiscuous(&promisc);
+    esp_wifi_get_channel(&cur_ch, &cur_sec);
+    if (!promisc || cur_ch != channel) {
+        ESP_LOGE(TAG, "enter_monitor: verify failed promisc=%d ch=%u want=%u",
+                 promisc, (unsigned)cur_ch, (unsigned)channel);
+        s_monitor_err = "VERIFY";
+        return false;
+    }
+
     s_monitor_channel = channel;
     s_monitor_active = true;
-
-    ESP_LOGI(TAG, "Monitor mode active on channel %d", channel);
+    ESP_LOGI(TAG, "Monitor mode active on channel %u", (unsigned)channel);
     return true;
 }
 
@@ -234,6 +311,7 @@ static uint8_t at_setup_cmd_m1monitor(uint8_t para_num)
             return ESP_AT_RESULT_CODE_ERROR;
         }
         if (!enter_monitor((uint8_t)channel)) {
+            at_send_line("+M1MONITOR:ERR:%s\r\n", s_monitor_err);
             return ESP_AT_RESULT_CODE_ERROR;
         }
         return ESP_AT_RESULT_CODE_OK;
@@ -365,8 +443,9 @@ static uint8_t at_setup_cmd_m1deauth(uint8_t para_num)
 
     /* Enter monitor mode if needed */
     if (!enter_monitor((uint8_t)channel)) {
-        at_send_line("+M1DEAUTH:ERR:MONITOR\r\n");
-        ESP_LOGE(TAG, "M1DEAUTH: enter_monitor(%d) failed", (int)channel);
+        at_send_line("+M1DEAUTH:ERR:MONITOR:%s\r\n", s_monitor_err);
+        ESP_LOGE(TAG, "M1DEAUTH: enter_monitor(%d) failed: %s",
+                 (int)channel, s_monitor_err);
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
@@ -549,11 +628,10 @@ static uint8_t at_setup_cmd_m1beacon(uint8_t para_num)
         }
         s_beacon_ssid_count = ssid_count;
 
-        /* Ensure monitor mode */
-        if (!s_monitor_active) {
-            if (!enter_monitor(s_monitor_channel)) {
-                return ESP_AT_RESULT_CODE_ERROR;
-            }
+        /* Ensure monitor mode is healthy — idempotent when already there. */
+        if (!enter_monitor(s_monitor_channel)) {
+            at_send_line("+M1BEACON:ERR:MONITOR:%s\r\n", s_monitor_err);
+            return ESP_AT_RESULT_CODE_ERROR;
         }
 
         stop_task(&s_beacon_task_handle, &s_beacon_stop_flag);
@@ -671,6 +749,7 @@ static uint8_t at_setup_cmd_m1probe(uint8_t para_num)
 
         /* Enter monitor mode */
         if (!enter_monitor((uint8_t)channel)) {
+            at_send_line("+M1PROBE:ERR:MONITOR:%s\r\n", s_monitor_err);
             return ESP_AT_RESULT_CODE_ERROR;
         }
 
@@ -895,6 +974,7 @@ static uint8_t at_setup_cmd_m1pmkid(uint8_t para_num)
 
     /* Enter monitor mode */
     if (!enter_monitor((uint8_t)channel)) {
+        at_send_line("+M1PMKID:ERR:MONITOR:%s\r\n", s_monitor_err);
         return ESP_AT_RESULT_CODE_ERROR;
     }
 
@@ -1090,6 +1170,7 @@ static uint8_t at_setup_cmd_m1karma(uint8_t para_num)
         }
 
         if (!enter_monitor((uint8_t)channel)) {
+            at_send_line("+M1KARMA:ERR:MONITOR:%s\r\n", s_monitor_err);
             return ESP_AT_RESULT_CODE_ERROR;
         }
 
@@ -1274,6 +1355,7 @@ static uint8_t at_setup_cmd_m1hscap(uint8_t para_num)
 
     /* Enter monitor mode */
     if (!enter_monitor((uint8_t)channel)) {
+        at_send_line("+M1HSCAP:ERR:MONITOR:%s\r\n", s_monitor_err);
         return ESP_AT_RESULT_CODE_ERROR;
     }
 

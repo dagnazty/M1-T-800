@@ -33,6 +33,8 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 
+#include "at_custom_zigbee_cmd.h"
+
 #define TAG "ZIGSNIFF"
 
 /* Max 802.15.4 frame is 127 bytes */
@@ -40,6 +42,8 @@
 
 /* Queue depth for ISR→task handoff */
 #define FRAME_QUEUE_DEPTH 64
+#define SNIFFER_STOP_WAIT_MS 500
+#define SNIFFER_STOP_POLL_MS 10
 
 /* 802.15.4 Frame Control field bit masks */
 #define FCF_FRAME_TYPE_MASK   0x0007
@@ -79,6 +83,8 @@ static TaskHandle_t  s_output_task = NULL;
 static bool          s_sniffing = false;
 static bool          s_radio_enabled = false;
 static uint8_t       s_channel = 0;
+static m1_zigbee_frame_callback_t s_frame_callback = NULL;
+static void *s_frame_callback_ctx = NULL;
 
 /* ========================================================================
  * IEEE 802.15.4 Receive Callback (called from ISR context)
@@ -317,13 +323,21 @@ static void parse_frame(const uint8_t *data, uint8_t len, parsed_frame_t *pf)
 
 static void zigbee_output_task(void *arg)
 {
+    (void)arg;
+
     zigbee_frame_t zf;
     char hex_buf[256];
     char dst_addr_str[20];
     char src_addr_str[20];
 
-    while (s_sniffing) {
+    for (;;) {
         if (xQueueReceive(s_frame_queue, &zf, pdMS_TO_TICKS(100)) == pdTRUE) {
+            if (s_frame_callback) {
+                s_frame_callback(zf.data, zf.len, zf.channel, zf.rssi, zf.lqi,
+                                 s_frame_callback_ctx);
+                continue;
+            }
+
             /* Parse the MAC header */
             parsed_frame_t pf;
             parse_frame(zf.data, zf.len, &pf);
@@ -350,9 +364,143 @@ static void zigbee_output_task(void *arg)
                              hex_buf);
             esp_at_port_write_data((uint8_t *)resp, n);
         }
+
+        if (!s_sniffing) {
+            break;
+        }
     }
 
+    s_output_task = NULL;
     vTaskDelete(NULL);
+}
+
+/* ========================================================================
+ * Shared service helpers
+ * ======================================================================== */
+
+void m1_zigbee_set_frame_callback(m1_zigbee_frame_callback_t callback, void *ctx)
+{
+    s_frame_callback = callback;
+    s_frame_callback_ctx = ctx;
+}
+
+bool m1_zigbee_sniffer_is_running(void)
+{
+    return s_sniffing;
+}
+
+uint8_t m1_zigbee_sniffer_channel(void)
+{
+    return s_channel;
+}
+
+esp_err_t m1_zigbee_init(bool enable)
+{
+    if (!enable) {
+        if (s_sniffing) {
+            esp_err_t err = m1_zigbee_sniffer_stop();
+            if (err != ESP_OK) {
+                return err;
+            }
+        }
+
+        if (s_radio_enabled) {
+            esp_ieee802154_sleep();
+        }
+        return ESP_OK;
+    }
+
+    if (!s_radio_enabled) {
+        esp_err_t ret = esp_ieee802154_enable();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "802154 enable failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+        s_radio_enabled = true;
+    }
+
+    esp_ieee802154_set_promiscuous(true);
+    REG_SET_BIT(IEEE802154_CTRL_CFG_REG, IEEE802154_DIS_FRAME_VERSION_RSV_FILTER);
+    return ESP_OK;
+}
+
+esp_err_t m1_zigbee_sniffer_stop(void)
+{
+    if (!s_sniffing) {
+        return ESP_OK;
+    }
+
+    s_sniffing = false;
+    esp_ieee802154_sleep();
+
+    if (s_output_task) {
+        uint32_t waited_ms = 0;
+
+        while ((s_output_task != NULL) && (waited_ms < SNIFFER_STOP_WAIT_MS)) {
+            vTaskDelay(pdMS_TO_TICKS(SNIFFER_STOP_POLL_MS));
+            waited_ms += SNIFFER_STOP_POLL_MS;
+        }
+
+        if (s_output_task != NULL) {
+            ESP_LOGW(TAG, "Output task did not stop cleanly, forcing delete");
+            vTaskDelete(s_output_task);
+            s_output_task = NULL;
+        }
+    }
+
+    if (s_frame_queue) {
+        vQueueDelete(s_frame_queue);
+        s_frame_queue = NULL;
+    }
+
+    s_channel = 0;
+    ESP_LOGI(TAG, "Sniffer stopped (radio sleeping)");
+    return ESP_OK;
+}
+
+esp_err_t m1_zigbee_sniffer_start(uint8_t channel)
+{
+    if (channel < 11 || channel > 26) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = m1_zigbee_init(true);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    if (s_sniffing) {
+        esp_ieee802154_sleep();
+        esp_ieee802154_set_channel(channel);
+        s_channel = channel;
+        esp_ieee802154_receive();
+        ESP_LOGI(TAG, "Switched to channel %d", channel);
+        return ESP_OK;
+    }
+
+    s_frame_queue = xQueueCreate(FRAME_QUEUE_DEPTH, sizeof(zigbee_frame_t));
+    if (!s_frame_queue) {
+        ESP_LOGE(TAG, "Queue create failed");
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_ieee802154_set_channel(channel);
+    esp_ieee802154_set_rx_when_idle(true);
+    s_channel = channel;
+
+    s_sniffing = true;
+    if (xTaskCreate(zigbee_output_task, "zig_out", 4096, NULL, 5, &s_output_task) != pdPASS) {
+        ESP_LOGE(TAG, "Output task create failed");
+        s_sniffing = false;
+        vQueueDelete(s_frame_queue);
+        s_frame_queue = NULL;
+        s_channel = 0;
+        return ESP_ERR_NO_MEM;
+    }
+    esp_ieee802154_receive();
+
+    ESP_LOGI(TAG, "Sniffer started on channel %d", channel);
+    return ESP_OK;
 }
 
 /* ========================================================================
@@ -365,7 +513,7 @@ static uint8_t at_query_cmd_zigsniff(uint8_t *cmd_name)
     char resp[64];
     int n = snprintf(resp, sizeof(resp),
                      "+ZIGSNIFF:%d,%u\r\n",
-                     s_sniffing ? 1 : 0, s_channel);
+                     m1_zigbee_sniffer_is_running() ? 1 : 0, m1_zigbee_sniffer_channel());
     esp_at_port_write_data((uint8_t *)resp, n);
     return ESP_AT_RESULT_CODE_OK;
 }
@@ -382,104 +530,21 @@ static uint8_t at_setup_cmd_zigsniff(uint8_t para_num)
     }
 
     if (enable == 0) {
-        /* === STOP sniffing === */
-        if (!s_sniffing) {
-            return ESP_AT_RESULT_CODE_OK;  /* already stopped */
-        }
-        s_sniffing = false;
-
-        /* Sleep the radio but do NOT disable — disable/enable cycle
-         * breaks the 802.15.4 driver and causes subsequent scans to fail */
-        esp_ieee802154_sleep();
-
-        /* Wait for output task to exit */
-        if (s_output_task) {
-            vTaskDelay(pdMS_TO_TICKS(200));
-            s_output_task = NULL;
-        }
-
-        /* Clean up queue */
-        if (s_frame_queue) {
-            vQueueDelete(s_frame_queue);
-            s_frame_queue = NULL;
-        }
-
-        s_channel = 0;
-        ESP_LOGI(TAG, "Sniffer stopped (radio sleeping)");
-        return ESP_AT_RESULT_CODE_OK;
+        return (m1_zigbee_sniffer_stop() == ESP_OK)
+            ? ESP_AT_RESULT_CODE_OK
+            : ESP_AT_RESULT_CODE_ERROR;
     }
 
     if (enable == 1) {
-        /* === START sniffing === */
-        if (s_sniffing) {
-            /* Already running — just switch channel if provided */
-            if (para_num >= 2) {
-                if (esp_at_get_para_as_digit(1, &channel) != ESP_AT_PARA_PARSE_RESULT_OK) {
-                    return ESP_AT_RESULT_CODE_ERROR;
-                }
-                if (channel < 11 || channel > 26) {
-                    return ESP_AT_RESULT_CODE_ERROR;
-                }
-                esp_ieee802154_sleep();
-                esp_ieee802154_set_channel((uint8_t)channel);
-                s_channel = (uint8_t)channel;
-                esp_ieee802154_receive();
-                ESP_LOGI(TAG, "Switched to channel %d", (int)channel);
-            }
-            return ESP_AT_RESULT_CODE_OK;
-        }
-
-        /* Parse channel (required for start) */
         if (para_num < 2) {
             return ESP_AT_RESULT_CODE_ERROR;
         }
         if (esp_at_get_para_as_digit(1, &channel) != ESP_AT_PARA_PARSE_RESULT_OK) {
             return ESP_AT_RESULT_CODE_ERROR;
         }
-        if (channel < 11 || channel > 26) {
-            return ESP_AT_RESULT_CODE_ERROR;
-        }
-
-        /* Create frame queue */
-        s_frame_queue = xQueueCreate(FRAME_QUEUE_DEPTH, sizeof(zigbee_frame_t));
-        if (!s_frame_queue) {
-            ESP_LOGE(TAG, "Queue create failed");
-            return ESP_AT_RESULT_CODE_ERROR;
-        }
-
-        /* Initialize 802.15.4 radio (only on first use) */
-        if (!s_radio_enabled) {
-            esp_err_t ret = esp_ieee802154_enable();
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "802154 enable failed: %s", esp_err_to_name(ret));
-                vQueueDelete(s_frame_queue);
-                s_frame_queue = NULL;
-                return ESP_AT_RESULT_CODE_ERROR;
-            }
-            s_radio_enabled = true;
-        }
-
-        esp_ieee802154_set_promiscuous(true);
-
-        /* Disable hardware frame version filter — promiscuous mode only disables
-         * address/PAN filtering, but the version filter independently rejects
-         * 802.15.4-2015 frames (version 2) used by Thread. Without this,
-         * Thread frames are silently dropped at the MAC hardware level. */
-        REG_SET_BIT(IEEE802154_CTRL_CFG_REG, IEEE802154_DIS_FRAME_VERSION_RSV_FILTER);
-
-        esp_ieee802154_set_channel((uint8_t)channel);
-        esp_ieee802154_set_rx_when_idle(true);
-        s_channel = (uint8_t)channel;
-
-        /* Start output task */
-        s_sniffing = true;
-        xTaskCreate(zigbee_output_task, "zig_out", 4096, NULL, 5, &s_output_task);
-
-        /* Start receiving */
-        esp_ieee802154_receive();
-
-        ESP_LOGI(TAG, "Sniffer started on channel %d", (int)channel);
-        return ESP_AT_RESULT_CODE_OK;
+        return (m1_zigbee_sniffer_start((uint8_t)channel) == ESP_OK)
+            ? ESP_AT_RESULT_CODE_OK
+            : ESP_AT_RESULT_CODE_ERROR;
     }
 
     return ESP_AT_RESULT_CODE_ERROR;

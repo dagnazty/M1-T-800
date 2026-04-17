@@ -40,6 +40,7 @@
 
 #include "esp_at.h"
 #include "at_interface.h"
+#include "m1_rpc_init.h"
 
 #ifndef CONFIG_AT_SOCKET_MAX_CONN_NUM
 #define CONFIG_AT_SOCKET_MAX_CONN_NUM       1
@@ -271,4 +272,6 @@ void app_main(void)
 #endif
 
     at_custom_init();
+
+    m1_rpc_setup();
 }

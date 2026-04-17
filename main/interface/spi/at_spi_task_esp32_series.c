@@ -41,6 +41,7 @@
 
 #include "driver/gpio.h"
 #include "driver/spi_slave_hd.h"
+#include "m1_rpc.h"
 
 static const char* TAG = "SPI-AT";
 #define SPI_SLAVE_HANDSHARK_GPIO    CONFIG_SPI_HANDSHAKE_PIN
@@ -165,7 +166,7 @@ static int32_t at_spi_read_data(uint8_t* data, int32_t len)
 }
 
 /* Result of AT command, auto call when read_data get data */
-static int32_t at_spi_write_data(uint8_t* buf, int32_t len)
+int32_t at_spi_write_data(uint8_t* buf, int32_t len)
 {
     uint32_t length = 0;
     if (len < 0 || buf == NULL) {
@@ -256,9 +257,15 @@ static void at_spi_slave_task(void* pvParameters)
                 break;
             }
 
-            xStreamBufferSend(spi_slave_rx_ring_buf, (void*) data_buf, ret_trans->trans_len, portMAX_DELAY);
-            // notify length to AT core
-            esp_at_port_recv_data_notify(ret_trans->trans_len, portMAX_DELAY);
+            /* Phase 1: route binary RPC frames to m1_rpc_feed(),
+             * AT strings go to the existing ring buffer / AT parser. */
+            if (m1_rpc_is_binary_frame(data_buf, ret_trans->trans_len)) {
+                m1_rpc_feed(data_buf, ret_trans->trans_len);
+            } else {
+                xStreamBufferSend(spi_slave_rx_ring_buf, (void*) data_buf, ret_trans->trans_len, portMAX_DELAY);
+                // notify length to AT core
+                esp_at_port_recv_data_notify(ret_trans->trans_len, portMAX_DELAY);
+            }
 
         } else if (trans_msg.direct == SPI_SLAVE_WR) {     // slave -> master
             remain_len = xStreamBufferBytesAvailable(spi_slave_tx_ring_buf);

@@ -206,6 +206,20 @@ def at_patch_if_config(platform, module):
     else:
         ESP_LOGE('patches update check has failed.')
 
+    # M1: neutralize ieee80211_raw_frame_sanity_check so raw deauth/auth/etc
+    # management frames injected via esp_wifi_80211_tx() are not silently dropped.
+    # Idempotent: running on an already-patched archive is a no-op.
+    deauth_tool = os.path.join(os.getcwd(), 'tools', 'patch_deauth.py')
+    deauth_lib = os.path.join(
+        os.getcwd(), 'esp-idf', 'components', 'esp_wifi', 'lib',
+        platform.lower(), 'libnet80211.a'
+    )
+    if os.path.exists(deauth_tool) and os.path.exists(deauth_lib):
+        cmd = '{} {} {}'.format(sys.executable, deauth_tool, deauth_lib)
+        if subprocess.call(cmd, shell = True):
+            raise Exception('deauth patch failed.')
+        ESP_LOGI('deauth patch check completed.')
+
 def build_project(platform_name, module_name, silence, build_args):
     tool = os.path.join('esp-idf', 'tools', 'idf.py')
     if sys.platform == 'win32':

@@ -320,6 +320,96 @@ static const struct ble_gatt_svc_def hid_svcs[] = {
 };
 
 /* ========================================================================
+ * Shared helpers
+ * ======================================================================== */
+
+bool m1_ble_hid_is_ready(void)
+{
+    return s_hid_registered && s_report_input_handle != 0;
+}
+
+esp_err_t m1_ble_hid_init(bool enable)
+{
+    if (!enable) {
+        ESP_LOGI(TAG, "HID state reset");
+        s_hid_registered = false;
+        s_report_input_handle = 0;
+        s_report_output_handle = 0;
+        return ESP_OK;
+    }
+
+    if (s_hid_registered) {
+        ESP_LOGI(TAG, "HID already registered, input_handle=%d", s_report_input_handle);
+        return ESP_OK;
+    }
+
+    ble_svc_gap_device_appearance_set(0x03C1);
+
+    int rc = ble_gatts_add_dynamic_svcs(hid_svcs);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_gatts_add_dynamic_svcs failed: %d", rc);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "HID services registered, input_handle=%d", s_report_input_handle);
+
+    if (s_report_input_handle == 0) {
+        ESP_LOGE(TAG, "input handle not populated by NimBLE");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_hid_registered = true;
+    return ESP_OK;
+}
+
+esp_err_t m1_ble_hid_send_keyboard_report(uint8_t modifier,
+                                          const uint8_t *keys,
+                                          uint8_t key_count)
+{
+    if (key_count > 6) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!m1_ble_hid_is_ready()) {
+        ESP_LOGE(TAG, "HID not registered");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    struct ble_gap_conn_desc desc;
+    uint16_t conn = BLE_HS_CONN_HANDLE_NONE;
+    for (uint16_t h = 0; h < 10; h++) {
+        if (ble_gap_conn_find(h, &desc) == 0) {
+            conn = h;
+            break;
+        }
+    }
+    if (conn == BLE_HS_CONN_HANDLE_NONE) {
+        ESP_LOGE(TAG, "No BLE connection");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint8_t report[8] = {0};
+    report[0] = modifier;
+    for (uint8_t i = 0; i < key_count; i++) {
+        report[2 + i] = keys[i];
+    }
+
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(report, sizeof(report));
+    if (om == NULL) {
+        ESP_LOGE(TAG, "mbuf alloc failed");
+        return ESP_ERR_NO_MEM;
+    }
+
+    int rc = ble_gatts_notify_custom(conn, s_report_input_handle, om);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "notify failed: %d", rc);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+/* ========================================================================
  * AT Command Handlers
  * ======================================================================== */
 
@@ -336,45 +426,12 @@ at_setup_cmd_blehidinit(uint8_t para_num)
     if (esp_at_get_para_as_digit(0, &enable) != ESP_AT_PARA_PARSE_RESULT_OK)
         return ESP_AT_RESULT_CODE_ERROR;
 
-    if (enable == 0) {
-        /* Reset registration state — call before AT+BLEINIT=0 so next
-         * AT+HIDKBINIT=1 re-registers GATT services after BLE reinit */
-        ESP_LOGI(TAG, "HID state reset");
-        s_hid_registered = false;
-        s_report_input_handle = 0;
-        s_report_output_handle = 0;
-        return ESP_AT_RESULT_CODE_OK;
-    }
-
-    if (enable != 1)
+    if (enable != 0 && enable != 1)
         return ESP_AT_RESULT_CODE_ERROR;
 
-    if (s_hid_registered) {
-        ESP_LOGI(TAG, "HID already registered, input_handle=%d", s_report_input_handle);
-        return ESP_AT_RESULT_CODE_OK;
-    }
-
-    /* Set GAP Appearance to Keyboard (0x03C1) so Windows HOGP driver binds */
-    ble_svc_gap_device_appearance_set(0x03C1);
-
-    /* Register DIS + Battery + HID services via the dynamic path.
-     * Requires CONFIG_BT_NIMBLE_DYNAMIC_SERVICE=y in sdkconfig.
-     * Must be called after AT+BLEINIT=2 and before AT+BLEADVSTART. */
-    int rc = ble_gatts_add_dynamic_svcs(hid_svcs);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "ble_gatts_add_dynamic_svcs failed: %d", rc);
-        return ESP_AT_RESULT_CODE_ERROR;
-    }
-
-    ESP_LOGI(TAG, "HID services registered, input_handle=%d", s_report_input_handle);
-
-    if (s_report_input_handle == 0) {
-        ESP_LOGE(TAG, "input handle not populated by NimBLE");
-        return ESP_AT_RESULT_CODE_ERROR;
-    }
-
-    s_hid_registered = true;
-    return ESP_AT_RESULT_CODE_OK;
+    return (m1_ble_hid_init(enable == 1) == ESP_OK)
+        ? ESP_AT_RESULT_CODE_OK
+        : ESP_AT_RESULT_CODE_ERROR;
 }
 
 /*
@@ -389,53 +446,20 @@ at_setup_cmd_blehidkb(uint8_t para_num)
     if (para_num < 7)
         return ESP_AT_RESULT_CODE_ERROR;
 
-    if (!s_hid_registered || s_report_input_handle == 0) {
-        ESP_LOGE(TAG, "HID not registered");
-        return ESP_AT_RESULT_CODE_ERROR;
-    }
-
-    /* Find active connection */
-    struct ble_gap_conn_desc desc;
-    uint16_t conn = BLE_HS_CONN_HANDLE_NONE;
-    for (uint16_t h = 0; h < 10; h++) {
-        if (ble_gap_conn_find(h, &desc) == 0) {
-            conn = h;
-            break;
-        }
-    }
-    if (conn == BLE_HS_CONN_HANDLE_NONE) {
-        ESP_LOGE(TAG, "No BLE connection");
-        return ESP_AT_RESULT_CODE_ERROR;
-    }
-
-    /* Parse parameters: modifier + 6 keycodes */
     int32_t vals[7];
     for (int i = 0; i < 7; i++) {
         if (esp_at_get_para_as_digit(i, &vals[i]) != ESP_AT_PARA_PARSE_RESULT_OK)
             return ESP_AT_RESULT_CODE_ERROR;
     }
 
-    /* Build 8-byte keyboard report: [modifier, 0x00, key1..key6] */
-    uint8_t report[8];
-    report[0] = (uint8_t)vals[0];  /* modifier */
-    report[1] = 0x00;              /* reserved */
-    for (int i = 0; i < 6; i++)
-        report[2 + i] = (uint8_t)vals[1 + i];
-
-    /* Send notification */
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(report, sizeof(report));
-    if (om == NULL) {
-        ESP_LOGE(TAG, "mbuf alloc failed");
-        return ESP_AT_RESULT_CODE_ERROR;
+    uint8_t keys[6];
+    for (int i = 0; i < 6; i++) {
+        keys[i] = (uint8_t)vals[1 + i];
     }
 
-    int rc = ble_gatts_notify_custom(conn, s_report_input_handle, om);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "notify failed: %d", rc);
-        return ESP_AT_RESULT_CODE_ERROR;
-    }
-
-    return ESP_AT_RESULT_CODE_OK;
+    return (m1_ble_hid_send_keyboard_report((uint8_t)vals[0], keys, 6) == ESP_OK)
+        ? ESP_AT_RESULT_CODE_OK
+        : ESP_AT_RESULT_CODE_ERROR;
 }
 
 /* ========================================================================

@@ -59,6 +59,22 @@ jobs:
           export HAS_IDF_PREREQUISITES=1
           ./build.py install
 
+      - name: Patch schema package for Python 3.10 Compatibility
+        run: |
+          /home/runner/.espressif/python_env/idf5.1_py3.10_env/bin/python -c "
+          import schema, os
+          f = schema.__file__
+          print('Patching schema file:', f)
+          content = open(f).read()
+          old_str = 'pattern = self._schema.pattern_str'
+          new_str = 'pattern = self._schema.pattern_str.pattern if hasattr(self._schema.pattern_str, \'pattern\') else self._schema.pattern_str'
+          if old_str in content:
+              open(f, 'w').write(content.replace(old_str, new_str))
+              print('Schema package successfully patched!')
+          else:
+              print('Schema package already patched or structure differs.')
+          "
+
       - name: Build Firmware
         run: |
           ./build.py build

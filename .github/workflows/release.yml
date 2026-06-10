@@ -73,6 +73,14 @@ jobs:
         run: |
           ./build.py build
 
+      - name: Create and push tag (manual dispatch only)
+        if: github.event_name == 'workflow_dispatch' && inputs.version != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ inputs.version }}"
+          git push origin "${{ inputs.version }}"
+
       - name: Verify Build Output
         run: |
           if [ ! -f build/factory/factory_ESP32C6-SPI.bin ]; then
@@ -110,6 +118,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.VERSION }}
           files: |
             release_binaries/m1-t800-factory-${{ env.VERSION }}.bin
             release_binaries/flasher_args.json

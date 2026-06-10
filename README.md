@@ -1,115 +1,116 @@
-# ESP-AT
-[![Documentation Version](./docs/_static/at_doc_latest.svg)](https://docs.espressif.com/projects/esp-at/en/latest/)
+# M1 T-800 Firmware (ESP32-C6 Coprocessor)
 
-- [中文版](#esp-at-项目)
+[![Companion Firmware](https://img.shields.io/badge/Companion--Firmware-M1__T--1000-blueviolet?style=flat-square&logo=github)](https://github.com/dagnazty/M1_T-1000)
+[![License: GPL v3 / MIT](https://img.shields.io/badge/License-GPL%20v3%20%2F%20MIT-blue?style=flat-square)](#licensing)
+[![Platform: ESP32-C6](https://img.shields.io/badge/Platform-ESP32--C6-orange?style=flat-square)](https://www.espressif.com/en/products/socs/esp32-c6)
 
-esp-at project was started and powered by Espressif Systems (@[espressif](https://github.com/espressif/)) as an official project, for the **ESP32-C2**, **ESP32-C3**, **ESP32-C6**, **ESP32**, and **ESP8266** Series SoCs provided for Windows, Linux, and macOS.  
-It is now supported and maintained by Espressif esp-at team (@[esp-at](https://github.com/espressif/esp-at)).
+**T-800** is the customized ESP32-C6 SPI AT firmware for the **Monstatek M1** handheld multi-tool. It acts as the dedicated wireless co-processor, providing 2.4 GHz Wi-Fi 6, Bluetooth LE 5.0, and Zigbee/Thread (IEEE 802.15.4) capabilities.
 
-# Introduction
-Espressif Wi-Fi and Bluetooth® chipsets are often used as add-on modules to seamlessly integrate wireless connectivity features into new and existing products.  
-In an effort to facilitate this and cut down on engineering costs, Espressif Systems has developed a set of AT commands that can be used to interface with Espressif products.
+The co-processor communicates with the M1's main system microcontroller over a high-speed SPI bus using a custom RPC (Remote Procedure Call) protocol built on top of Espressif's AT command framework.
 
-"AT" means 'attention'. Each command string is prefixed with "AT", and a number of discrete commands can be concatenated after the "AT".
+---
 
-The AT command firmware allows for rapid integration by providing:
+## ⚡ Companion Firmware
 
-- In-built TCP/IP stack and data buffering
-- Easy integration with resource-constrained host platforms
-- Easy-to-parse command-response protocols
-- Customized, user-defined AT commands
+This firmware is designed to run in tandem with the **[M1 T-1000 Firmware](https://github.com/dagnazty/M1_T-1000)**, a community-driven, feature-expanded firmware for the Monstatek M1 main board. 
 
-# Resources
-- There are several guides for esp-at developers and users. These guides can be rendered in a number of formats, like HTML and PDF.  
-  Documentation for the latest version: [https://docs.espressif.com/projects/esp-at/en/latest/index.html](https://docs.espressif.com/projects/esp-at/en/latest/index.html). This documentation is built from the [docs directory](https://github.com/espressif/esp-at/tree/master/docs) of this repository.
+---
 
-- The Changelogs of historic released versions: https://github.com/espressif/esp-at/releases
+## 🛠️ Custom Features & AT Commands
 
-- [Check the Issues section on GitHub](https://github.com/espressif/esp-at/issues) if you find a bug or have a feature request. Please check existing Issues before opening a new one.
+In addition to standard Espressif AT commands, this firmware implements custom commands specifically designed for offensive security, network analysis, and device emulation on the Monstatek M1.
 
-- The [esp-at forum](https://www.esp32.com/viewforum.php?f=42) is a place to ask questions and find community resources.
+### 🌐 Wi-Fi & Pentesting Commands
 
-- The [ESP Product Selector](https://products.espressif.com/#/product-selector?language=en&names=) is a tool to help you compare different chips or modules.
+These commands handle promiscuous sniffing, packet injection, and offensive Wi-Fi techniques.
 
-# ESP-AT Support Policy for ESP Chip Series
+| Command | Type | Description |
+| :--- | :--- | :--- |
+| `AT+M1WIFISTATS?` | Query | Retrieves current connection status, Wi-Fi mode, RSSI, channel, BSSID, and IP address. |
+| `AT+M1MONITOR=<enable>,<channel>` | Setup | Enables (`1`) or disables (`0`) promiscuous monitor mode on channels 1–14. |
+| `AT+M1DEAUTH=<bssid>,<channel>[,<client_mac>,<count>]` | Setup | Launches a targeted or broadcast deauthentication flood. `count=0` runs continuously. |
+| `AT+M1DEAUTHSTOP` | Exec | Stops any running deauthentication flood. |
+| `AT+M1DEAUTHALL` | Exec | Scans the area and broadcasts deauthentication frames to every visible AP using channel hopping. |
+| `AT+M1BEACON=<enable>[,<ssid1>,<ssid2>,...]` | Setup | Starts or stops broadcasting fake AP beacons. Supports up to 8 SSIDs. |
+| `AT+M1PROBE=<enable>,<channel>,<duration>` | Setup | Sniffs and decodes 802.11 probe requests from clients in range. |
+| `AT+M1PMKID=<bssid>,<channel>` | Setup | Solicits and captures WPA2/WPA3 PMKID hashes from a target Access Point. |
+| `AT+M1KARMA=<enable>[,<channel>]` | Setup | Runs a Karma attack, automatically responding to client probe requests with fake AP beacons. |
+| `AT+M1HSCAP=<enable>,<channel>,<bssid>` | Setup | Monitors and captures 4-way WPA/WPA2 handshakes. |
+| `AT+M1EVILTWIN=<enable>[,<ssid>,<channel>]` | Setup | Spawns a rogue Access Point hosting a DNS-hijacking captive portal to harvest credentials. |
+| `AT+M1BLESPAM=<enable>[,<vendor>]` | Setup | Floods nearby devices with BLE proximity pairing advertisements. Vendors: `0` (All), `1` (Apple), `2` (Google), `3` (Microsoft). |
 
-- ESP32-C2 Series
-  - **Preferred recommended chip for using ESP-AT on**
-  - Recommended released version: [v3.1.0.0](https://github.com/espressif/esp-at/releases/tag/v3.1.0.0)
+### ⌨️ BLE HID Keyboard Emulation
 
-- ESP32-C3 Series
-  - **Preferred recommended chip for using ESP-AT on**
-  - Recommended released version: [v3.2.0.0](https://github.com/espressif/esp-at/releases/tag/v3.2.0.0)
+Used for BadUSB/BadBT wireless keystroke injection.
 
-- ESP32-C6 Series
-  - **Preferred recommended chip for using ESP-AT on**
-  - Recommended released version: [v4.0.0.0](https://github.com/espressif/esp-at/releases/tag/v4.0.0.0)
+*   **`AT+HIDKBINIT=<enable>`**
+    Registers the BLE Human Interface Device (HID) GATT services (GATT DIS, Battery, and HID reports) via the NimBLE stack.
+*   **`AT+HIDKBSEND=<modifier>,<key1>,...,<key6>`**
+    Sends standard 8-byte keyboard reports over BLE. Key codes follow the USB HID usage tables. Use `AT+HIDKBSEND=0,0,0,0,0,0,0` to release all keys.
 
-- ESP32 Series
-  - Recommended released version: [v3.2.0.0](https://github.com/espressif/esp-at/releases/tag/v3.2.0.0)
+### 📡 Zigbee & IEEE 802.15.4 Sniffer
 
-- ESP8266 Series
-  - **ESP32-C2 is recommended to use instead**
-  - ESP-AT will not release the major version for ESP8266.
-  - ESP-AT no longer adds new features to ESP8266.
-  - [v2.2.1.0_esp8266](https://github.com/espressif/esp-at/releases/tag/v2.2.1.0_esp8266) is the last version of ESP-AT for ESP8266, corresponding to branch [release/v2.2.0.0_esp8266](https://github.com/espressif/esp-at/tree/release/v2.2.0.0_esp8266), corresponding to documentation [https://docs.espressif.com/projects/esp-at/en/release-v2.2.0.0_esp8266](https://docs.espressif.com/projects/esp-at/en/release-v2.2.0.0_esp8266/).
-  - ESP-AT will regularly update [release/v2.2.0.0_esp8266](https://github.com/espressif/esp-at/tree/release/v2.2.0.0_esp8266) branch for ESP8266. Update includes vital bugfix and security repair.
+Promiscuous sniffing for IoT networks.
 
-- Other Series
-  - ESP-AT will support ESP32-C5 series of chips.
-  - ESP-AT will not support ESP32-S and ESP32-H series of chips.
+*   **`AT+ZIGSNIFF=<enable>[,<channel>]`**
+    Starts or stops promiscuous sniffing on IEEE 802.15.4 channels 11–26.
+*   **Unsolicited Event Output:**
+    When sniffing, captured frames are output in real time over the AT interface:
+    ```text
+    +ZIGFRAME:<proto>,<ftype>,<len>,<ch>,<rssi>,<lqi>,<dst_pan>,<dst_addr>,<src_pan>,<src_addr>,<hex_data>
+    ```
+    *   `proto`: `Z` (Zigbee), `T` (Thread), `U` (Unknown)
+    *   `ftype`: `BCN` (Beacon), `DATA`, `ACK`, `CMD`
+    *   `hex_data`: Hexadecimal string of the captured frame payload.
 
-# ESP-AT 项目
-esp-at 作为由 Espressif Systems (@[espressif](https://github.com/espressif/)) 发起和提供技术支持的官方项目，适用于 Windows、Linux、macOS 上的 **ESP32-C2**、**ESP32-C3**、**ESP32-C6**、**ESP32**、和 **ESP8266** 系列芯片。  
-当前该项目由 Espressif esp-at 团队 (@[esp-at](https://github.com/espressif/esp-at)) 负责技术支持和维护。  
+---
 
-# 简介
-乐鑫 Wi-Fi 和蓝牙芯片可以用作附加模块，完美集成在其他现有产品上，提供无线通讯功能。
-为降低客户开发成本，乐鑫开发了一套 AT 指令集，方便客户简单快速地使用 AT 指令来控制芯片。
+## 🏗️ Building & Flashing
 
-乐鑫提供的 AT 指令固件具有以下特色，利于芯片集成到应用中：
+### Prerequisites
 
-- 内置 TCP/IP 堆栈和数据缓冲
-- 能便捷地集成到资源受限的主机平台中
-- 主机对指令的回应易于解析
-- 用户可自定义 AT 指令
+You must set up the Espressif ESP-IDF toolchain. This project uses **ESP-IDF v5.1**.
+Make sure submodules are initialized:
+```bash
+git submodule update --init --recursive
+```
 
-# 资源
-- 这里为开发者和用户提供了一些指南，这些指南可以以多种格式呈现，比如 HTML 和 PDF。  
-  最新文档见：[https://docs.espressif.com/projects/esp-at/zh_CN/latest/index.html](https://docs.espressif.com/projects/esp-at/zh_CN/latest/index.html)。该文档是由本仓库 [docs 目录](https://github.com/espressif/esp-at/tree/master/docs) 自动编译构建的。
+### 1. Build the Firmware
 
-- 已发布版本的修改记录见：https://github.com/espressif/esp-at/releases
+A build script wrapper, [build_m1.sh](file:///Users/dag/Documents/GitHub/esp32-at-monstatek-m1/build_m1.sh), is provided to export the correct module flags and target the ESP32-C6:
 
-- 如果你有 bug 上报或者功能需求，可以在 [GitHub Issues](https://github.com/espressif/esp-at/issues) 里提交。请在提交前检索下是否有相同的 Issue。
+```bash
+chmod +x build_m1.sh
+./build_m1.sh
+```
 
-- [esp-at 社区](https://www.esp32.com/viewforum.php?f=34) 可以用来询问问题或寻找一些社区资源。
+### 2. Flashing
 
-- [产品选型工具](https://products.espressif.com/#/product-selector?language=zh&names=) 可以帮助你对比不同的芯片或模组。
+You can flash the compiled firmware directly using `idf.py` over serial:
+```bash
+idf.py -p (PORT) flash
+```
 
-# ESP-AT 对不同芯片系列支持策略
+Alternatively, you can flash the consolidated factory binary containing the bootloader, partition table, and application merged together:
+*   **Factory Binary Path:** `build/factory/factory_ESP32C6-SPI.bin`
+*   **Flash Address:** `0x0`
+*   **Command:**
+    ```bash
+    esptool.py -p (PORT) -b 460800 --chip esp32c6 write_flash 0x0 build/factory/factory_ESP32C6-SPI.bin
+    ```
 
-- ESP32-C2 系列
-  - **ESP-AT 首选推荐芯片**
-  - 推荐使用的发布版本：[v3.1.0.0](https://github.com/espressif/esp-at/releases/tag/v3.1.0.0)
+---
 
-- ESP32-C3 系列
-  - **ESP-AT 首选推荐芯片**
-  - 推荐使用的发布版本：[v3.2.0.0](https://github.com/espressif/esp-at/releases/tag/v3.2.0.0)
+## ⚖️ Licensing
 
-- ESP32-C6 系列
-  - **ESP-AT 首选推荐芯片**
-  - 推荐使用的发布版本：[v4.0.0.0](https://github.com/espressif/esp-at/releases/tag/v4.0.0.0)
+This repository uses a split licensing model:
 
-- ESP32 系列
-  - 推荐使用的发布版本：[v3.2.0.0](https://github.com/espressif/esp-at/releases/tag/v3.2.0.0)
+1.  **Core ESP-AT Framework:** The underlying AT commands, build systems, and Espressif components are licensed under the **Espressif MIT License** (see [LICENSE](file:///Users/dag/Documents/GitHub/esp32-at-monstatek-m1/LICENSE)).
+2.  **Custom M1 T-800 Additions:** All custom AT commands (`main/at_custom_wifi_cmd.c`, `main/at_custom_hid_cmd.c`, `main/at_custom_zigbee_cmd.c`) and SPI RPC components (`main/rpc/*`) are licensed under the **GNU General Public License v3.0 (GPL-3.0)** to align with the companion [M1 T-1000 Firmware](https://github.com/dagnazty/M1_T-1000).
 
-- ESP8266 系列
-  - **推荐使用 ESP32-C2 芯片**
-  - ESP-AT 不再为 ESP8266 添加新功能
-  - ESP-AT 不再为 ESP8266 发布大版本
-  - [v2.2.1.0_esp8266](https://github.com/espressif/esp-at/releases/tag/v2.2.1.0_esp8266) 是 ESP-AT 为 ESP8266 发布的最后一个版本，对应分支为 [release/v2.2.0.0_esp8266](https://github.com/espressif/esp-at/tree/release/v2.2.0.0_esp8266)，对应文档为 [https://docs.espressif.com/projects/esp-at/zh_CN/release-v2.2.0.0_esp8266](https://docs.espressif.com/projects/esp-at/zh_CN/release-v2.2.0.0_esp8266/)
-  - ESP-AT 将定期在 [release/v2.2.0.0_esp8266](https://github.com/espressif/esp-at/tree/release/v2.2.0.0_esp8266) 分支为 ESP8266 进行重要 bug 修复，安全修补等更新
+---
 
-- 其它系列
-  - ESP-AT 将计划支持 ESP32-C5 系列芯片
-  - ESP-AT 无计划支持 ESP32-S、ESP32-H 系列芯片
+## 🤝 Acknowledgments
+
+*   **[Espressif Systems](https://github.com/espressif)** - Developers of the core ESP-AT project and ESP32-C6 hardware platform.
+*   **[@bedge117](https://github.com/bedge117)** - Created the initial SPI configuration, Monstatek M1 pin-mappings, BLE HID dynamic service registration, and Zigbee sniffer integration.

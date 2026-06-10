@@ -59,21 +59,15 @@ jobs:
           export HAS_IDF_PREREQUISITES=1
           ./build.py install
 
-      - name: Patch schema package for Python 3.10 Compatibility
+      - name: Fix idf-component-manager compatibility
         run: |
-          /home/runner/.espressif/python_env/idf5.1_py3.10_env/bin/python -c "
-          import schema, os
-          f = schema.__file__
-          print('Patching schema file:', f)
-          content = open(f).read()
-          if 'hasattr(' not in content:
-              content = content.replace(', s.pattern_str', ', (s.pattern_str.pattern if hasattr(s.pattern_str, \'pattern\') else s.pattern_str)')
-              content = content.replace(', self._schema.pattern_str', ', (self._schema.pattern_str.pattern if hasattr(self._schema.pattern_str, \'pattern\') else self._schema.pattern_str)')
-              open(f, 'w').write(content)
-              print('Schema package successfully patched!')
-          else:
-              print('Schema package already patched.')
-          "
+          # idf-component-manager==1.4.1 (installed by ESP-IDF v5.1) uses a
+          # version of the `schema` library that passes compiled re.Pattern objects
+          # directly to re.sub(), which breaks on Python 3.10+.
+          # Upgrading to 2.x pins schema>=0.7.5 and contains the proper fix.
+          /home/runner/.espressif/python_env/idf5.1_py3.10_env/bin/pip install \
+            "idf-component-manager>=2.0.0" --quiet
+          echo "idf-component-manager upgraded successfully"
 
 
       - name: Build Firmware

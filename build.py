@@ -215,12 +215,29 @@ def at_patch_if_config(platform, module):
         platform.lower(), 'libnet80211.a'
     )
     if os.path.exists(deauth_tool) and os.path.exists(deauth_lib):
-        cmd = '{} {} {}'.format(sys.executable, deauth_tool, deauth_lib)
-        if subprocess.call(cmd, shell = True):
-            raise Exception('deauth patch failed.')
-        ESP_LOGI('deauth patch check completed.')
+        import shutil
+        if shutil.which('riscv32-esp-elf-ar') or os.environ.get('RISCV_AR'):
+            cmd = '{} {} {}'.format(sys.executable, deauth_tool, deauth_lib)
+            if subprocess.call(cmd, shell = True):
+                raise Exception('deauth patch failed.')
+            ESP_LOGI('deauth patch check completed.')
+        else:
+            ESP_LOGI('deauth patch check deferred (toolchain not installed/exported yet).')
+
 
 def build_project(platform_name, module_name, silence, build_args):
+    # Apply deauth patch now that the environment variables are fully set up
+    deauth_tool = os.path.join(os.getcwd(), 'tools', 'patch_deauth.py')
+    deauth_lib = os.path.join(
+        os.getcwd(), 'esp-idf', 'components', 'esp_wifi', 'lib',
+        platform_name.lower(), 'libnet80211.a'
+    )
+    if os.path.exists(deauth_tool) and os.path.exists(deauth_lib):
+        cmd = '{} {} {}'.format(sys.executable, deauth_tool, deauth_lib)
+        if subprocess.call(cmd, shell = True):
+            raise Exception('deauth patch failed during build step.')
+        ESP_LOGI('deauth patch check completed.')
+
     tool = os.path.join('esp-idf', 'tools', 'idf.py')
     if sys.platform == 'win32':
         sys_python_path = sys.executable

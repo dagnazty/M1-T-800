@@ -61,13 +61,12 @@ jobs:
 
       - name: Fix idf-component-manager compatibility
         run: |
-          # idf-component-manager==1.4.1 (installed by ESP-IDF v5.1) uses a
-          # version of the `schema` library that passes compiled re.Pattern objects
-          # directly to re.sub(), which breaks on Python 3.10+.
-          # Upgrading to 2.x pins schema>=0.7.5 and contains the proper fix.
+          # idf-component-manager==1.4.1 (bundled with ESP-IDF v5.1) uses a broken
+          # version of the `schema` lib that passes compiled re.Pattern to re.sub().
+          # 2.x fixes this. ESP-IDF v5.1 constrains <3, so we pin within that range.
           /home/runner/.espressif/python_env/idf5.1_py3.10_env/bin/pip install \
-            "idf-component-manager>=2.0.0" --quiet
-          echo "idf-component-manager upgraded successfully"
+            "idf-component-manager>=2.0.0,<3" --quiet
+          echo "idf-component-manager upgraded to: $(/home/runner/.espressif/python_env/idf5.1_py3.10_env/bin/pip show idf-component-manager | grep Version)"
 
 
       - name: Build Firmware

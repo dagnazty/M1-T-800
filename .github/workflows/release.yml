@@ -66,14 +66,15 @@ jobs:
           f = schema.__file__
           print('Patching schema file:', f)
           content = open(f).read()
-          old_str = 'pattern = self._schema.pattern_str'
-          new_str = 'pattern = self._schema.pattern_str.pattern if hasattr(self._schema.pattern_str, \'pattern\') else self._schema.pattern_str'
-          if old_str in content:
-              open(f, 'w').write(content.replace(old_str, new_str))
+          if 'hasattr(' not in content:
+              content = content.replace(', s.pattern_str', ', (s.pattern_str.pattern if hasattr(s.pattern_str, \'pattern\') else s.pattern_str)')
+              content = content.replace(', self._schema.pattern_str', ', (self._schema.pattern_str.pattern if hasattr(self._schema.pattern_str, \'pattern\') else self._schema.pattern_str)')
+              open(f, 'w').write(content)
               print('Schema package successfully patched!')
           else:
-              print('Schema package already patched or structure differs.')
+              print('Schema package already patched.')
           "
+
 
       - name: Build Firmware
         run: |

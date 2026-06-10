@@ -1,0 +1,111 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.0.0)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build M1 T-800 Firmware
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install System Prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git wget flex bison gperf python3 python3-pip python3-venv python3-setuptools cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0
+
+      - name: Configure ESP-AT Build Settings
+        run: |
+          mkdir -p build
+          echo '{"platform": "PLATFORM_ESP32C6", "module": "ESP32C6-SPI", "silence": 0}' > build/module_info.json
+          
+          # Initialize empty/dummy at_ota_token.h if not present
+          cd components/at/private_include
+          rm -f at_ota_token.h
+          echo -e "#pragma once" > at_ota_token.h
+          echo -e "#define CONFIG_ESP_AT_OTA_TOKEN_ESP32C6_4MB \"\"" >> at_ota_token.h
+          echo -e "#define CONFIG_ESP_AT_OTA_SSL_TOKEN_ESP32C6_4MB \"\"" >> at_ota_token.h
+          cd -
+
+      - name: Install ESP-IDF and Tools
+        run: |
+          # Prevent build.py from triggering apt-get internally since we already installed the packages
+          export HAS_IDF_PREREQUISITES=1
+          ./build.py install
+
+      - name: Build Firmware
+        run: |
+          ./build.py build
+
+      - name: Verify Build Output
+        run: |
+          if [ ! -f build/factory/factory_ESP32C6-SPI.bin ]; then
+            echo "Error: Combined factory binary was not generated!"
+            exit 1
+          fi
+
+      - name: Prepare Release Assets
+        run: |
+          # Resolve version string
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION="${{ github.ref_name }}"
+          else
+            VERSION="draft-${{ github.sha }}"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          
+          mkdir -p release_binaries
+          # Copy and rename the combined factory binary for release
+          cp build/factory/factory_ESP32C6-SPI.bin release_binaries/m1-t800-factory-${VERSION}.bin
+          
+          # Also package helper configs for flashing
+          cp build/flasher_args.json release_binaries/flasher_args.json
+          cp build/download.config release_binaries/download.config
+
+      - name: Upload Build Artifacts (CI Run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: m1-t800-firmware-${{ env.VERSION }}
+          path: release_binaries/*
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release_binaries/m1-t800-factory-${{ env.VERSION }}.bin
+            release_binaries/flasher_args.json
+            release_binaries/download.config
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

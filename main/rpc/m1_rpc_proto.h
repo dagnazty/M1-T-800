@@ -64,6 +64,7 @@ typedef enum {
 #define M1_MSG_WIFI_CONNECT        0x0104
 #define M1_MSG_WIFI_DISCONNECT     0x0105
 #define M1_MSG_WIFI_GET_STATUS     0x0106
+#define M1_MSG_WIFI_SCAN_RESULTS   0x0107
 
 /* WiFi AP 0x0200–0x02FF */
 #define M1_MSG_SOFTAP_START        0x0200
@@ -85,6 +86,9 @@ typedef enum {
 #define M1_MSG_OFF_HSCAPTURE      0x030B
 #define M1_MSG_OFF_RAW_TX         0x030C
 #define M1_MSG_OFF_DEAUTH_STATUS  0x030D
+#define M1_MSG_OFF_DEAUTH_ALL     0x030E
+#define M1_MSG_OFF_EVILTWIN_START 0x030F
+#define M1_MSG_OFF_EVILTWIN_STOP  0x0310
 
 /* BLE 0x0400–0x04FF */
 #define M1_MSG_BLE_INIT            0x0400
@@ -96,6 +100,8 @@ typedef enum {
 #define M1_MSG_BLE_HID_KEYPRESS    0x0406
 #define M1_MSG_BLE_CONNECT         0x0407
 #define M1_MSG_BLE_DISCONNECT      0x0408
+#define M1_MSG_BLE_SPAM_START      0x0409
+#define M1_MSG_BLE_SPAM_STOP       0x040A
 
 /* Zigbee 0x0500–0x05FF */
 #define M1_MSG_ZB_INIT             0x0500
@@ -125,6 +131,7 @@ typedef enum {
 #define M1_EVT_ZB_FRAME            0xE050
 #define M1_EVT_STA_CONNECTED       0xE060
 #define M1_EVT_STA_DISCONNECTED    0xE061
+#define M1_EVT_EVILTWIN_CREDS      0xE070
 #define M1_EVT_ERROR               0xE0FF
 
 #ifdef __cplusplus

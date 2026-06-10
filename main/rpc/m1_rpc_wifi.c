@@ -203,6 +203,57 @@ static m1_status_t cmd_wifi_scan(const uint8_t *payload, uint16_t len,
 }
 
 /**
+ * 0x0107 WIFI_SCAN_RESULTS
+ * Returns the AP records buffered by the most recent WIFI_SCAN.
+ * Response: [1 byte count] then, per AP:
+ *   [6 bytes BSSID][1 byte RSSI][1 byte channel][1 byte authmode]
+ *   [1 byte ssid_len][ssid bytes]
+ * Note: esp_wifi_scan_get_ap_records() frees the internal list, so this
+ * returns results once per scan.
+ */
+#define WIFI_SCAN_MAX_REPORT 20
+
+static m1_status_t cmd_wifi_scan_results(const uint8_t *payload, uint16_t len,
+                                         uint8_t *resp, uint16_t *resp_len)
+{
+    static wifi_ap_record_t records[WIFI_SCAN_MAX_REPORT];
+    uint16_t num = WIFI_SCAN_MAX_REPORT;
+
+    esp_err_t err = esp_wifi_scan_get_ap_records(&num, records);
+    if (err != ESP_OK) return M1_ERR_HARDWARE;
+
+    uint8_t count = (num > WIFI_SCAN_MAX_REPORT) ? WIFI_SCAN_MAX_REPORT
+                                                 : (uint8_t)num;
+    uint16_t pos = 1;
+    uint8_t written = 0;
+
+    for (uint8_t i = 0; i < count; i++) {
+        uint8_t ssid_len = 0;
+        while (ssid_len < 32 && records[i].ssid[ssid_len] != '\0') {
+            ssid_len++;
+        }
+        uint16_t entry = 6 + 1 + 1 + 1 + 1 + ssid_len;
+        if (pos + entry > M1_RPC_MAX_PAYLOAD) break;
+
+        memcpy(resp + pos, records[i].bssid, 6);
+        pos += 6;
+        resp[pos++] = (uint8_t)records[i].rssi;
+        resp[pos++] = records[i].primary;          /* primary channel */
+        resp[pos++] = (uint8_t)records[i].authmode;
+        resp[pos++] = ssid_len;
+        if (ssid_len > 0) {
+            memcpy(resp + pos, records[i].ssid, ssid_len);
+            pos += ssid_len;
+        }
+        written++;
+    }
+
+    resp[0] = written;
+    *resp_len = pos;
+    return M1_OK;
+}
+
+/**
  * 0x0104 WIFI_CONNECT
  * Payload: [1 byte ssid_len][ssid][1 byte pass_len][password]
  * Response blocks until connected or timeout.
@@ -437,6 +488,7 @@ m1_status_t m1_rpc_wifi_sta_handler(uint16_t msg_id,
         case M1_MSG_WIFI_SET_MODE:   return cmd_wifi_set_mode(payload, payload_len, resp_buf, resp_len);
         case M1_MSG_WIFI_GET_MAC:    return cmd_wifi_get_mac(payload, payload_len, resp_buf, resp_len);
         case M1_MSG_WIFI_SCAN:       return cmd_wifi_scan(payload, payload_len, resp_buf, resp_len);
+        case M1_MSG_WIFI_SCAN_RESULTS: return cmd_wifi_scan_results(payload, payload_len, resp_buf, resp_len);
         case M1_MSG_WIFI_CONNECT:    return cmd_wifi_connect(payload, payload_len, resp_buf, resp_len);
         case M1_MSG_WIFI_DISCONNECT: return cmd_wifi_disconnect(payload, payload_len, resp_buf, resp_len);
         case M1_MSG_WIFI_GET_STATUS: return cmd_wifi_get_status(payload, payload_len, resp_buf, resp_len);

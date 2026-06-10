@@ -3,6 +3,7 @@ file(GLOB_RECURSE srcs *.c)
 list(APPEND srcs
     rpc/m1_rpc_ble.c
     rpc/m1_rpc_zigbee.c
+    rpc/m1_rpc_eviltwin.c
 )
 
 idf_component_register(SRCS ${srcs}

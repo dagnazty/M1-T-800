@@ -28,6 +28,9 @@
 #include "esp_at.h"
 #include "esp_log.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "host/ble_hs.h"
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
@@ -341,6 +344,21 @@ esp_err_t m1_ble_hid_init(bool enable)
     if (s_hid_registered) {
         ESP_LOGI(TAG, "HID already registered, input_handle=%d", s_report_input_handle);
         return ESP_OK;
+    }
+
+    /* The host (M1) sends AT+HIDKBINIT immediately after AT+BLEINIT. If the
+     * NimBLE host hasn't finished syncing yet, ble_gatts_add_dynamic_svcs()
+     * registers against an unready stack and the characteristic value handles
+     * (.val_handle) never get populated — the host sees this as "fail step 3".
+     * Wait for sync first. */
+    int waited_ms = 0;
+    while (!ble_hs_synced() && waited_ms < 3000) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        waited_ms += 50;
+    }
+    if (!ble_hs_synced()) {
+        ESP_LOGE(TAG, "BLE host not synced; cannot register HID");
+        return ESP_ERR_INVALID_STATE;
     }
 
     ble_svc_gap_device_appearance_set(0x03C1);

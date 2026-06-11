@@ -103,10 +103,11 @@ jobs:
           mkdir -p release_binaries
           # Copy and rename the combined factory binary for release
           cp build/factory/factory_ESP32C6-SPI.bin release_binaries/m1-t800-factory-${VERSION}.bin
-          
-          # Also package helper configs for flashing
-          cp build/flasher_args.json release_binaries/flasher_args.json
-          cp build/download.config release_binaries/download.config
+
+          # Generate MD5 checksum
+          cd release_binaries
+          md5sum m1-t800-factory-${VERSION}.bin > m1-t800-factory-${VERSION}.bin.md5
+          cd -
 
       - name: Upload Build Artifacts (CI Run)
         uses: actions/upload-artifact@v4
@@ -121,8 +122,7 @@ jobs:
           tag_name: ${{ env.VERSION }}
           files: |
             release_binaries/m1-t800-factory-${{ env.VERSION }}.bin
-            release_binaries/flasher_args.json
-            release_binaries/download.config
+            release_binaries/m1-t800-factory-${{ env.VERSION }}.bin.md5
           draft: false
           prerelease: false
           generate_release_notes: true
